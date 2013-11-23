@@ -1,4 +1,5 @@
 base2pkg
 ========
 
-Split a FreeBSD base into pkgng packages
+Split a FreeBSD base into pkgng packages by KNOBS
+

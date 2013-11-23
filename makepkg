@@ -1,0 +1,274 @@
+#!/bin/sh
+SRCDIR=${SRCDIR:-"/usr/src"}
+MYDIR=$(dirname `realpath $0`)
+WORKDIR=${WORKDIR:-"$MYDIR"}
+KNOBS="${MYDIR}/knobs.inc"
+DEF_BDNAME="defaultbase" # default base dir name
+DEF_TMPWRKDIR="${WORKDIR}/work"
+DEF_BD="${DEF_TMPWRKDIR}/${DEF_BDNAME}" #default base dir
+DSTDIR="${WORKDIR}/txz"
+
+if [ -f "/usr/local/bin/svn" ]; then
+    REVISION=$(cd ${SRCDIR} && /usr/local/bin/svn info 2>/dev/null | awk '/Revision:/{print $2}')
+else
+    REVISION=$(date "+%Y%m%d")
+fi
+
+VER=`sysctl -n kern.osrelease|cut -d - -f 1`
+MVER=${VER%%.*}
+PKGVER="${VER}.${REVISION}"
+
+# Set to 0 for skip using md(4) disk. It may be necessary if you do not have RAM ~1.2 GB RAM (for 2 copy of FreeBSD base) or junt want to kill your drive.
+MDSIZE="1200m"
+###
+
+# fatal error. Print message then quit with exitval
+err() {
+        exitval=$1
+        shift
+        echo -e "$*" 1>&2
+        exit $exitval
+}
+
+#convert string to lower case
+tolower()
+{
+	echo $1 |tr '[:upper:]' '[:lower:]'
+}
+
+set_files_tofile()
+{
+	local _file _rootfile
+	truncate -s0 ${1}
+
+	for _file in `eval ${find_files}`; do
+	    echo "${_file#$temp_workdir}" >> ${1}
+	done
+}
+
+set_dirs_tofile()
+{
+	local _dir _rootdir
+
+	truncate -s0 ${1}
+
+	for _dir in `eval ${find_dirs}`; do
+	    echo "${_dir#$temp_workdir}" >> ${1}
+	done
+}
+
+set_files()
+{
+        local _file
+
+	files=""
+
+        for _file in `cat $1`; do
+		echo "${files}  ${_file}: '-'"
+        done
+}
+
+set_dirs()
+{
+        local _dirs _dir
+
+	dir=""
+
+        for _dir in `cat $1`; do
+                echo "${dirs}${_dir}/: y"
+        done
+}
+
+set_files_size()
+{
+    local _size="0" _end=/tmp/end.$$ _endsong="ThisIsTheEndMyOnlyFriend" _myfile
+
+    # this is sign of end while loop below and time for output _size value
+    echo ${_endsong} > ${_end}
+
+    cat ${1} ${_end} | while read _myfile; do
+	[ "${_myfile}" = "${_endsong}" ] && echo ${_size} && exit
+	_size=$((_size + `stat -f %z ${DEF_BD}${_myfile}`))
+    done
+
+    rm -f ${_end}
+}
+
+
+set_pre_scripts()
+{
+    local _flags _i _mychflags
+    set +e
+    _mychflags=$( cat ${1} |while read _myfile; do
+	_flags=`stat -f "%Of" ${DEF_BD}/${_myfile} 2>/dev/null`
+	[ "${_flags}" != "0" ] && echo ${_myfile}
+    done)
+
+    [ -z "${_mychflags}" ] && return 0
+    printf "chflags noschg "
+    for _i in ${_mychflags}; do
+	printf "${_i}"
+    done
+    set -e
+}
+
+# create separated removed,added,updated files from two hier list
+# $1 - dst dir. $2 - src dir. $3 - knobname
+create_hierdiff()
+{
+	truncate -s0 ${3}.added
+
+	sort ${1} > ${1}.sort.$$
+	sort ${2} > ${2}.sort.$$
+
+	comm -13 ${1}.sort.$$ ${2}.sort.$$ > ${3}.added
+	comm -1 ${1}.sort.$$ ${2}.sort.$$ |grep -v ^/ > ${3}.removed
+
+	rm -f ${1}.sort.$$ ${2}.sort.$$
+}
+
+# Install new files
+install_from_index()
+{
+    cd ${DEF_BD}
+    cat ${DEF_TMPWRKDIR}/${1}.files.added ${DEF_TMPWRKDIR}/${1}.dirs.added |while read _myfile; do
+	echo "${DEF_BD}/${_myfile}" |sed s:${DEF_BD}:./:g |cpio -pdmu ${temp_workdir} >/dev/null 2>/dev/null
+    done
+    cd ${WORKDIR}
+}
+
+create_pkg()
+{
+    pkgdir="${temp_workdir#$DEF_BD}"
+    fakeroot="${DEF_TMPWRKDIR}/${DEF_BDNAME}"
+
+    #take from master ld-elf.so.hints
+    [ ! -f "${fakeroot}/var/run/ld-elf.so.hints" ] && cp /var/run/ld-elf.so.hints ${fakeroot}/var/run/
+
+    . ${MYDIR}/manifest.inc
+
+    files=`eval set_files ${DEF_TMPWRKDIR}/${1}.files.added`
+    dirs=`eval set_dirs ${DEF_TMPWRKDIR}/${1}.dirs.added`
+    flatsize=`eval set_files_size ${DEF_TMPWRKDIR}/${1}.files.added`
+    chflags_files=`eval set_pre_scripts ${DEF_TMPWRKDIR}/${1}.files.added`
+
+#echo "\
+cat > ${temp_workdir}/+MANIFEST <<EOF
+name: $name
+version: $version
+origin: $origin
+comment: $comment
+arch: $arch
+www: $www
+maintainer: $maintainer
+prefix: $prefix
+licenselogic: $licenselogic
+licenses: [$licenses]
+flatsize: $flatsize
+desc: $desc
+categories: [$categories]
+files:
+$files
+directories:
+$dirs
+EOF
+
+[ -n "${chflags_files}" ] && cat >> ${temp_workdir}/+MANIFEST <<EOF
+scripts:
+  pre-install: |
+    ${chflags_files}
+  pre-deinstall: |
+    ${chflags_files}
+EOF
+#" > ${temp_workdir}/+MANIFEST
+
+    pkg -c ${fakeroot} create -m $pkgdir -o $pkgdir none
+    mv ${temp_workdir}/$name-$version.txz ${DSTDIR}
+}
+
+### MAIN ###
+TRAP="echo \"Cleanup\""
+[ ! -d ${WORKDIR} ] && mkdir -p ${WORKDIR}
+cd ${WORKDIR}
+. ${KNOBS}
+
+all_knobs=$( echo ${__DEFAULT_YES_OPTIONS}| wc -w| awk '{printf $1}')
+cur_knobs=0
+
+[ ! -d "${DEF_TMPWRKDIR}" ] && mkdir -p ${DEF_TMPWRKDIR}
+
+#set -o xtrace
+
+if [ "${MDSIZE}" != "0" ]; then
+    MYMD=`mdconfig -a -t malloc -s ${MDSIZE} 2>/dev/null`
+    [ $? -ne 0 ] && err 1 "Error create md(4) with ${MDSIZE} size"
+    TRAP="${TRAP}; mdconfig -d -u ${MYMD}"
+    trap "${TRAP}" HUP INT ABRT BUS TERM EXIT
+    newfs -m0 -n -U /dev/${MYMD} > /dev/null 2>&1
+    [ $? -ne 0 ] && err 1 "Error create newfs on /dev/${MYMD}"
+    TRAP="umount -f ${DEF_TMPWRKDIR}; ${TRAP}; rmdir ${DEF_TMPWRKDIR}"
+    mount /dev/${MYMD} ${DEF_TMPWRKDIR}
+    trap "${TRAP}" HUP INT ABRT BUS TERM EXIT
+else
+    TRAP="${TRAP}; chflags -R noschg ${DEF_TMPWRKDIR}; rm -rf ${DEF_TMPWRKDIR}"
+    trap "${TRAP}" HUP INT ABRT BUS TERM EXIT
+fi
+
+[ ! -d "${DEF_BD}" ] && mkdir -p ${DEF_BD}
+[ ! -d "${DSTDIR}" ] && mkdir -p ${DSTDIR}
+
+set -e
+#make -C ${SRCDIR} installworld distribution DESTDIR="${DEF_BD}" > /dev/null 2>&1
+
+for i in ${DEF_BDNAME} ${__DEFAULT_YES_OPTIONS}; do
+    SKIP=0
+    MYKNOB="${i}"
+    i=`eval tolower $i`
+    echo " * WIP: ${i}. Knobs ${cur_knobs} from ${all_knobs}"
+    temp_workdir="${DEF_TMPWRKDIR}/${i}"
+    [ ! -d "${temp_workdir}" ] && mkdir ${temp_workdir}
+    make -C ${SRCDIR} WITHOUT_${MYKNOB}=YES installworld distribution DESTDIR="${temp_workdir}" > /dev/null
+
+    find_files="find -E ${temp_workdir} \( -type f -or -type l \)"
+    find_dirs="find -E ${temp_workdir} -type d"
+    set_files_tofile ${DEF_TMPWRKDIR}/${i}.files
+    set_dirs_tofile ${DEF_TMPWRKDIR}/${i}.dirs
+
+    if [ "${i}" = "${DEF_BDNAME}" ]; then
+	dfiles="${DEF_TMPWRKDIR}/${i}.files"
+	ddirs="${DEF_TMPWRKDIR}/${i}.dirs"
+    fi
+
+    kfiles=${DEF_TMPWRKDIR}/${i}.files
+    kdirs=${DEF_TMPWRKDIR}/${i}.dirs
+
+    # this is first pass? then skip cmp hier
+    [ "${i}" = "${DEF_BDNAME}" ] && continue
+
+    create_hierdiff ${kfiles} ${dfiles} ${DEF_TMPWRKDIR}/${i}.files
+    create_hierdiff ${kdirs} ${ddirs} ${DEF_TMPWRKDIR}/${i}.dirs
+
+    if [ `stat -f %z ${DEF_TMPWRKDIR}/${i}.files.added` -eq 0 ]; then
+	echo "Filelist for knobs ${MYKNOB} is empty. Skip"
+	SKIP=1
+    fi
+
+    chflags -R noschg ${temp_workdir} && rm -rf ${temp_workdir}
+
+    if [ $SKIP -eq 0 ]; then
+	temp_workdir="${DEF_TMPWRKDIR}/${DEF_BDNAME}/${i}.$$"
+	mkdir -p ${temp_workdir}
+	install_from_index ${i}
+	create_pkg ${i}
+	# cleanup
+	chflags -R noschg ${temp_workdir} && rm -rf ${temp_workdir}
+    fi
+
+	rm -f ${DEF_TMPWRKDIR}/${i}.dirs ${DEF_TMPWRKDIR}/${i}.dirs.added ${DEF_TMPWRKDIR}/${i}.dirs.removed \
+        ${DEF_TMPWRKDIR}/${i}.files ${DEF_TMPWRKDIR}/${i}.files.added ${DEF_TMPWRKDIR}/${i}.files.removed
+
+    cur_knobs=$(( cur_knobs + 1 ))
+#    [ $cur_knobs = 10 ] && exit
+done
+
+exit
