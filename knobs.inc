@@ -107,8 +107,6 @@ __DEFAULT_YES_OPTIONS="\
     TCSH \
     TELNET \
     TEXTPROC \
-    TOOLCHAIN \
-    UNBOUND \
     USB \
     UTMPX \
     WIRELESS \

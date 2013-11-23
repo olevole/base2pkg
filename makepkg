@@ -268,7 +268,6 @@ for i in ${DEF_BDNAME} ${__DEFAULT_YES_OPTIONS}; do
         ${DEF_TMPWRKDIR}/${i}.files ${DEF_TMPWRKDIR}/${i}.files.added ${DEF_TMPWRKDIR}/${i}.files.removed
 
     cur_knobs=$(( cur_knobs + 1 ))
-#    [ $cur_knobs = 10 ] && exit
 done
 
 exit

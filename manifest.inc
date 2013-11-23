@@ -8,7 +8,7 @@ categories="local"
 
 name="freebsd-${1}"
 version="${PKGVER}"
-origin="local/freebsd-base"
+origin="local/freebsd-${1}"
 comment="FreeBSD base"
 desc="|-
   FreeBSD base"
