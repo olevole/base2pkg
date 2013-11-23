@@ -61,8 +61,6 @@ __DEFAULT_YES_OPTIONS="\
     LDNS_UTILS \
     LEGACY_CONSOLE \
     LIB32 \
-    LIBPTHREAD \
-    LIBTHR \
     LOCALES \
     LOCATE \
     LPR \
